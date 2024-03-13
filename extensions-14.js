@@ -9,7 +9,7 @@ export const FormExtension = {
 
       const formContainer = document.createElement('form')
 
-      const { user_name, user_email, user_phone } = {'test_name', 'test_email', 'test_phone'}
+      const { user_name, user_email, user_phone } = {"user_name":"test_name", "user_email":"test_email", "user_phone":"test_phone"}
   
       formContainer.innerHTML = `
             <style>
