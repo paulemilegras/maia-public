@@ -7,8 +7,8 @@ export const FormExtension = {
       trace.type === 'ext_form' || trace.payload.name === 'ext_form',
     render: ({ trace, element }) => {
 
-      const { user_name, user_email, user_phone } = trace.payload
       const formContainer = document.createElement('form')
+      const { user_name, user_email, user_phone } = trace.payload
   
       formContainer.innerHTML = `
             <style>
