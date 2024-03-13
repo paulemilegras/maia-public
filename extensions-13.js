@@ -9,7 +9,7 @@ export const FormExtension = {
 
       const formContainer = document.createElement('form')
 
-      const { user_name, user_email, user_phone } = trace.payload
+      const { user_name, user_email, user_phone } = {'test_name', 'test_email', 'test_phone'}
   
       formContainer.innerHTML = `
             <style>
