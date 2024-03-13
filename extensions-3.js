@@ -6,6 +6,8 @@ export const FormExtension = {
     match: ({ trace }) =>
       trace.type === 'ext_form' || trace.payload.name === 'ext_form',
     render: ({ trace, element }) => {
+
+      const { user_name, user_email, user_phone } = trace.payload
       const formContainer = document.createElement('form')
   
       formContainer.innerHTML = `
@@ -40,13 +42,13 @@ export const FormExtension = {
             </style>
   
             <label for="name">Votre nom</label>
-            <input type="text" class="name" name="name" required><br><br>
+            <input type="text" class="name" name="name" required value="${user_name || ''}"><br><br>
   
             <label for="email">Email</label>
-            <input type="email" class="email" name="email" required pattern="[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$" title="Invalid email address"><br><br>
+            <input type="email" class="email" name="email" required pattern="[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$" title="Invalid email address" value="${user_email || ''}"><br><br>
   
             <label for="phone">Téléphone (optionnel)</label>
-            <input type="tel" class="phone" name="phone"><br><br>
+            <input type="tel" class="phone" name="phone" value="${user_phone || ''}"><br><br>
   
             <input type="submit" class="submit" value="Envoyer">
           `
