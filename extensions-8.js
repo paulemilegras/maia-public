@@ -8,7 +8,9 @@ export const FormExtension = {
     render: ({ trace, element }) => {
 
       const formContainer = document.createElement('form')
-      const { user_name, user_email, user_phone } = trace.payload
+
+      const user_name = trace.payload.user_name || 'Paul-Emile'
+      //const { user_name, user_email, user_phone } = trace.payload
   
       formContainer.innerHTML = `
             <style>
@@ -42,7 +44,7 @@ export const FormExtension = {
             </style>
   
             <label for="name">Votre nom</label>
-            <input type="text" class="name" name="name" required value="${user_name || ''}"><br><br>
+            <input type="text" class="name" name="name" required value="${user_name}"><br><br>
   
             <label for="email">Email</label>
             <input type="email" class="email" name="email" required pattern="[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$" title="Invalid email address" value="${user_email || ''}"><br><br>
