@@ -95,7 +95,7 @@ html, body {
 @media screen and (max-width: 768px) {
   .vfrc-chat {
     position: relative;
-    /*background-image: url('https://cdn.jsdelivr.net/gh/paulemilegras/MMA_class@main/ob_9693f5_baie-halong-vietnam.jpeg');*/
+    background-image: url('https://unsplash.com/fr/photos/ciel-bleu-et-nuages-blancs-pendant-la-journee-a-wKah54Snc');
     background-size: cover;
     background-position: center;
     overflow: hidden; 
