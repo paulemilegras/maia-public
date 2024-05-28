@@ -1,0 +1,943 @@
+##### Import libraries and load environment variables #####
+
+import datetime
+import hashlib
+import json
+import os
+import random
+import time
+import asyncio
+import threading
+
+import requests
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
+
+load_dotenv()
+
+WHATSAPP_VERSION = os.getenv("WHATSAPP_VERSION", "v19.0")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+VF_API_KEY = os.getenv("VF_API_KEY")
+VF_VERSION_ID = os.getenv("VF_VERSION_ID", "development")
+VF_PROJECT_ID = os.getenv("VF_PROJECT_ID", None)
+VF_DM_URL = os.getenv("VF_DM_URL", "https://general-runtime.voiceflow.com")
+VF_TRANSCRIPT_ICON = 'https://s3.amazonaws.com/com.voiceflow.studio/share/200x200/200x200.png'
+IMAGE_HANDLER = os.getenv("IMAGE_HANDLER", None)
+
+##### Define a few functions #####
+
+
+def rndID():
+  randomNo = random.randint(1, 1000)
+  timestamp = int(time.time())
+  weekday = [
+      'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
+      'Saturday'
+  ]
+  day = weekday[datetime.datetime.now().weekday()]
+  return str(randomNo) + day + str(timestamp)
+
+
+def truncate_string(string, max_length=20):
+  if string:
+    if len(string) > max_length:
+      return string[:max_length - 1] + '…'
+    return string
+  return ''
+
+
+def generate_unique_string_from_json(json_data):
+  # Convert the JSON data to a string in a consistent order
+  json_string = json.dumps(json_data, sort_keys=True)
+  # Create a hash of the JSON string
+  hex_string = hashlib.sha256(json_string.encode()).hexdigest()
+  # Map of hexadecimal to alphabet characters
+  hex_to_alpha = {
+      'a': 'a',
+      'b': 'b',
+      'c': 'c',
+      'd': 'd',
+      'e': 'e',
+      'f': 'f',
+      '0': 'g',
+      '1': 'h',
+      '2': 'i',
+      '3': 'j',
+      '4': 'k',
+      '5': 'l',
+      '6': 'm',
+      '7': 'n',
+      '8': 'o',
+      '9': 'p'
+  }
+  # Convert hex string to letters
+  return ''.join(hex_to_alpha[char] for char in hex_string)
+
+
+def process_carousel(carousel, carousel_body):
+
+  global WHATSAPP_TOKEN, IMAGE_HANDLER
+
+  ## 1. Check if the carousel template exists
+
+  #### 1.A. Fetch data specific to the template
+
+  carousel_cards_data = []
+  for card in carousel['payload']['cards'][:9]:
+    carousel_cards_data.append({
+        'title': card['title'],
+        'button': card['buttons'][0]['name']
+    })
+
+  carousel_data = {"title": carousel_body, "cards": carousel_cards_data}
+
+  # Compute the hash unique to this data
+  carousel_hash = generate_unique_string_from_json(carousel_data)
+
+  ## 1.B. Check if the template already exists
+
+  url = "https://graph.facebook.com/v18.0/212066148661321/message_templates?category=MARKETING"
+  payload = {}
+  headers = {
+      'Authorization': f'Bearer {WHATSAPP_TOKEN}',
+      'Content-Type': 'application/json'
+  }
+  response_template_list = requests.request("GET",
+                                            url,
+                                            headers=headers,
+                                            data=payload)
+  template_data = response_template_list.json()
+  template_names = [template['name'] for template in template_data['data']]
+
+  ## 2. If the template does not exist, create it
+
+  if carousel_hash not in template_names:
+
+    #### 2.A. Format carousel cards (from Voiceflow output)
+
+    carousel_template_cards = []
+    for card in carousel['payload']['cards'][:9]:
+      #a maximum of 10 cards is possible
+      carousel_template_cards.append({
+          "components": [{
+              "type": "HEADER",
+              "format": "IMAGE",
+              "example": {
+                  "header_handle": [IMAGE_HANDLER]
+              }
+          }, {
+              "type": "BODY",
+              "text": card['title']
+          }, {
+              "type":
+              "BUTTONS",
+              "buttons": [{
+                  "type": "QUICK_REPLY",
+                  "text": card['buttons'][0]['name']
+              }]
+          }]
+      })
+
+    #### 2.B. Create template
+
+    url = "https://graph.facebook.com/v18.0/212066148661321/message_templates"
+    headers = {
+        'Authorization': f'Bearer {WHATSAPP_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    payload = json.dumps({
+        "name":
+        carousel_hash,
+        "language":
+        "fr",
+        "category":
+        "MARKETING",
+        "components": [{
+            "type": "BODY",
+            "text": carousel_body
+        }, {
+            "type": "CAROUSEL",
+            "cards": carousel_template_cards
+        }]
+    })
+
+    response_template_creation = requests.request("POST",
+                                                  url,
+                                                  headers=headers,
+                                                  data=payload)
+
+    if response_template_creation.json().get('status') == 'PENDING':
+      time.sleep(3)
+
+  ## 3. Prepare the message
+
+  #Get template states
+  url = f'https://graph.facebook.com/v18.0/212066148661321/message_templates?fields=status&name={carousel_hash}'
+  payload = {}
+  headers = {
+      'Authorization': f'Bearer {WHATSAPP_TOKEN}',
+      'Content-Type': 'application/json'
+  }
+  response_template_states = requests.request("GET",
+                                              url,
+                                              headers=headers,
+                                              data=payload)
+
+  ## 3.A. If the template is approved
+
+  if (len(response_template_states.json()['data']) > 0 and
+      response_template_states.json()['data'][0].get('status') == 'APPROVED'):
+    #Format carousel cards (to WhatsApp input)
+    carousel_cards = []
+    for j, card in enumerate(carousel['payload']['cards'][:9]):
+      carousel_cards.append({
+          "card_index":
+          j,
+          "components": [
+              {
+                  "type":
+                  "HEADER",
+                  "parameters": [{
+                      "type": "IMAGE",
+                      "image": {
+                          "link": card['imageUrl']
+                      }
+                  }]
+              },
+              {
+                  "type": "BODY"
+              },
+              {
+                  "type":
+                  "BUTTON",
+                  "sub_type":
+                  "QUICK_REPLY",
+                  "index":
+                  "0",
+                  "parameters": [{
+                      "type":
+                      "PAYLOAD",
+                      "payload":
+                      str(
+                          json.dumps({
+                              'request_payload':
+                              card['buttons'][0]['request']['payload'],
+                              'request_type':
+                              card['buttons'][0]['request']['type']
+                          }))
+                      #str(card['buttons'][0]['request']['payload'])
+                  }]
+              }
+          ]
+      })
+    #Return data
+    return {
+        'type': 'carousel',
+        'carousel_hash': carousel_hash,
+        'carousel_cards': carousel_cards
+    }
+
+  else:
+    return {
+        'type': 'text',
+        'value': "Un problème est survenu lors de l'envoi du carnet de voyage"
+    }
+
+
+async def saveTranscript(username):
+
+  if VF_PROJECT_ID:
+    if not username or username == '' or username == None:
+      username = 'Anonymous'
+
+    url = "https://api.voiceflow.com/v2/transcripts"
+
+    headers = {
+        'Authorization': VF_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+
+    payload = {
+        'browser': 'WhatsApp',
+        'device': 'desktop',
+        'os': 'server',
+        'sessionID': session,
+        'unread': True,
+        'versionID': VF_VERSION_ID,
+        'projectID': VF_PROJECT_ID,
+        'user': {
+            'name': username,
+            'image': VF_TRANSCRIPT_ICON
+        }
+    }
+
+    response = requests.put(url, headers=headers, json=payload)
+
+    if response.status_code == 200:
+      print('Transcript Saved!')
+
+    else:
+      print('Failed to save transcript:', response.text)
+
+
+##### Define functions to interact with VF and send messages via WhatsApp #####
+
+
+async def interact(user_id, request, phone_number_id, user_name):
+
+  print("\nREQUEST TO VOICEFLOW\n", request['type'])
+
+  global session, noreplyTimeoutActive
+  # Clear existing timeout
+  if noreplyTimeoutActive:
+    noreplyTimeoutActive = False
+
+  
+
+  if not session:
+    session = f'{VF_VERSION_ID}.{rndID()}'
+
+  ## 1. Update variables
+
+  url = f'{VF_DM_URL}/state/user/{user_id}/variables'
+  headers = {'Authorization': VF_API_KEY, 'Content-Type': 'application/json'}
+  payload = {'user_id': user_id, 'user_name': user_name}
+
+  requests.patch(url, headers=headers, json=payload)
+
+  ## 2. Send request to VF
+
+  url = f'{VF_DM_URL}/state/user/{user_id}/interact'
+  #headers = {'Authorization': VF_API_KEY, 'Content-Type': 'application/json'} --> already defined above
+  payload = {
+      'action': request  #,
+      #'config': {'tts': False, 'stripSSML': True}
+  }
+
+  api_response = requests.post(url, headers=headers, json=payload)
+  responses = api_response.json()
+
+  print("\nOUTPUT FROM VOICEFLOW\n",
+        responses)  #[response['type'] for response in responses]) #responses)
+  isEnding = any(response['type'] == 'end' for response in responses)
+
+  ## 3. Process response
+
+  messages = []
+
+  for response in responses:
+
+    if response['type'] == 'text':
+
+      message = ''
+      for content in response['payload']['slate']['content']:
+        for child in content['children']:
+          ## A content is a row in the message. A child is an element of the content.
+          # If the row is composed only of text, then the content has only one child.
+          # If the row mixes text and urls it can be more than one child.
+          formatted_text = ''
+          if child.get('type') and child['type'] == 'link':
+            formatted_text = child['url']
+          elif child.get(
+              'text'
+          ):  # if type text, there is no "type" key, directly the text
+            if child.get('fontWeight'):
+              formatted_text = f"*{child['text']}*"
+            elif child.get('italic'):
+              formatted_text = f"_{child['text']}_"
+            elif child.get('underline'):
+              # WhatsApp doesn't support underline, so we just append the text
+              formatted_text += child['text']
+            elif child.get('strikeThrough'):
+              formatted_text = f"~{child['text']}~"
+            else:
+              formatted_text = child['text']
+          message += formatted_text
+        # Add a line break after each content (--> row)
+        message += '\n'
+
+      #Add message to the list.
+      #Small exception : if there is a button in the following message, you mark iit as "body" to merge the button to it just after.
+      #You merge so then the user can reply to this message via the button. Same for carousels.
+      if responses.index(response) < len(responses) - 1 and responses[
+          responses.index(response) + 1]['type'] in ['choice', 'carousel']:
+        messages.append({'type': 'body', 'value': message})
+      else:
+        messages.append({'type': 'text', 'value': message})
+
+    elif response['type'] == 'speak':
+      if response['payload']['type'] == 'audio':
+        messages.append({'type': 'audio', 'value': response['payload']['src']})
+      else:  #i.e. response['payload']['type'] == 'message' --> same you want to merge the buttons to be able to reply to it.
+        if responses.index(response) < len(responses) - 1 and responses[
+            responses.index(response) + 1]['type'] == 'choice':
+          messages.append({
+              'type': 'body',
+              'value': response['payload']['message']
+          })
+        else:
+          messages.append({
+              'type': 'text',
+              'value': response['payload']['message']
+          })
+
+    elif response['type'] == 'visual':
+      messages.append({'type': 'image', 'value': response['payload']['image']})
+
+    elif response['type'] == 'choice':
+      ## There are 3 types of buttons : path, intent and link
+      # Path : a button that takes the user to a specific path (most buttons)
+      # Format : {'name': 'Bouton simple',
+      #           'request': {'type': 'path-zqwv3bnl',
+      #                       'payload': {'label': 'Bouton 1',
+      #                                   'actions': []}}}
+      #  --> Request type : path-...
+      #  --> Request Payload with a label and no action
+      # Intent : a button that takes the user to a specific intent (step to an intent)
+      # Format : {'name': 'Bouton avec Intent',
+      #           'request': {'type': 'intent',
+      #                       'payload': {'query': 'bouton avec Intent',
+      #                                   'label': 'bouton avec Intent',
+      #                                   'intent': {'name': 'Intent'},
+      #                                   'actions': [],
+      #                                   'entities': []}}}
+      #  --> Request type : intent
+      #  --> Request Payload with a label, a query, an intent and no action
+      # Link : a button that opens a new page, to a specific url
+      # Format :    {'name': 'Bouton avec URL',
+      #              'request': {'type': 'path-s22lx3bvt',
+      #                          'payload': {'label': 'bouton avec URL',
+      #                                      'actions': [{'type': 'open_url',
+      #                                                   'payload': {'url': 'google.com'}}]}},
+      #  --> Request type : path-...
+      #  --> Request Payload with a label and an action (open_url here)
+
+      buttons = []
+      for button in response['payload']['buttons']:
+        # 1 : Path : request type = path-... and no action
+        if 'path-' in button['request']['type'] and not (
+            button['request']['payload'].get('actions')
+            and len(button['request']['payload']['actions']) > 0):
+          buttons.append({
+              'type': 'reply',
+              'reply': {
+                  'id': button['request']['type'],
+                  'title':
+                  truncate_string(button['request']['payload']['label'])
+              }
+          })
+        # 2 : Intent : request type = intent and no action
+        elif button['request']['type'] == 'intent' and not (
+            button['request']['payload'].get('actions')
+            and len(button['request']['payload']['actions']) > 0):
+          buttons.append({
+              'type': 'reply',
+              'reply': {
+                  'id': button['request']['payload']['intent']['name'],
+                  'title':
+                  truncate_string(button['request']['payload']['label'])
+              }
+          })
+        # 3 : Action button --> ingored for now
+        #elif button['request']['payload'].get('actions') and len(button['request']['payload']['actions'])>0:
+        #do nothing
+
+      if len(buttons) > 3:
+        buttons = buttons[:3]
+      messages.append({'type': 'buttons', 'buttons': buttons})
+
+    elif response['type'] == 'cardV2':
+      #We define a card that will be sent via WhatsApp : header, body, footer
+      header_image = response['payload']['imageUrl']
+      card_title = response['payload']['title']
+      card_description = response['payload']['description']['text']
+      #Then we define the buttons
+      buttons = []
+      for button in response['payload']['buttons']:
+        # 1 : Path : request type = path-... and no action
+        if button['request'].get('type') != 'intent' and not (
+            button['request']['payload'].get('actions')
+            and len(button['request']['payload']['actions']) > 0):
+          buttons.append({
+              'type': 'reply',
+              'reply': {
+                  'id': button['request']['type'],
+                  'title':
+                  truncate_string(button['request']['payload']['label'])
+              }
+          })
+        # 2 : Intent : request type = intent and no action
+        elif button['request']['type'] == 'intent' and not (
+            button['request']['payload'].get('actions')
+            and len(button['request']['payload']['actions']) > 0):
+          buttons.append({
+              'type': 'reply',
+              'reply': {
+                  'id': button['request']['payload']['intent']['name'],
+                  'title':
+                  truncate_string(button['request']['payload']['label'])
+              }
+          })
+      #We add the card to the messages list
+      messages.append({
+          'type': 'card',
+          'buttons': buttons,
+          'header_image': header_image,
+          'card_title': card_title,
+          'card_description': card_description
+      })
+
+    elif response['type'] == 'carousel':
+      #We start by processing the data
+      carousel_body = responses[responses.index(response) - 1]['payload'].get(
+          'message', 'Voici votre carnet de voyage :')
+      processed_carousel = process_carousel(response, carousel_body)
+      #If the carousel has been processed properly we add it to the messages list
+      #Else, we add the carousel_body to the messages list, followed by a warning for the user
+      if processed_carousel['type'] == 'carousel':
+        messages.append(processed_carousel)
+      else:
+        messages.append({'type': 'text', 'value': carousel_body})
+        messages.append(processed_carousel)
+
+    elif response['type'] == 'no-reply' and not isEnding:
+      print(response)
+      timeout_seconds = int(response['payload']['timeout'])
+      send_noreply_task = asyncio.create_task(sendNoReply(user_id, phone_number_id, user_name))
+      await asyncio.sleep(timeout_seconds)
+      await send_noreply_task
+    
+  
+
+
+  
+
+
+
+  
+      #if response['payload']['timeout'] == 1:
+      #  await sendNoReply(user_id, phone_number_id, user_name)
+
+      #timeout_seconds = int(response['payload']['timeout'])
+      #noreplyTimeoutActive = True
+      #p = threading.Thread(target=sendNoReplyDelayed,
+      #                     args=(user_id, phone_number_id, user_name,
+      #                           timeout_seconds))
+      #p.start()
+
+      # await sendNoReplyDelayed(user_id, phone_number_id, user_name, timeout_seconds)
+      #noreplyTimeout = asyncio.get_event_loop().call_later(
+      #    timeout_seconds, sendNoReply(user_id, phone_number_id, user_name)
+      #)
+      #noreplyTimeout = asyncio.get_event_loop().call_later(
+      #    timeout_seconds,
+      #    lambda: asyncio.create_task(
+      #        sendNoReply(user_id, phone_number_id, user_name)
+      #    )
+      #)
+
+    ## A Rajouter : autres custom actions
+
+  await sendMessage(messages, phone_number_id, user_id)
+
+  ## 4. Save transcript if this is the end of the session
+
+  # If end of session detected
+  if isEnding:
+    # Save transcript (with session)
+    #await saveTranscript(user_name)
+    # Restart session
+    session = None
+
+
+async def sendMessage(messages, phone_number_id, user_id):
+  timeoutPerKB = 10 / 1000  #10 milliseconds
+  for j, message in enumerate(messages):
+    payload = {}
+    if message['type'] == 'image':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'image',
+          'image': {
+              'link': message['value']
+          }
+      }
+    elif message['type'] == 'buttons':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'interactive',
+          'interactive': {
+              'type': 'button',
+              'body': {
+                  'text': messages[j - 1].get('value', 'Make your choice')
+              },  #previous message saved as "body" so no message sent twice
+              'action': {
+                  'buttons': message['buttons']
+              }
+          }
+      }
+    elif message['type'] == 'text':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'text',
+          'text': {
+              'preview_url': True,
+              'body': message['value']
+          }
+      }
+    elif message['type'] == 'card':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'interactive',
+          'interactive': {
+              'type': 'button',
+              'header': {
+                  'type': 'IMAGE',
+                  'image': {
+                      'link': message['header_image']
+                  }
+              },
+              'body': {
+                  'text': message['card_title']
+              },
+              'footer': {
+                  'text': message['card_description']
+              },
+              'action': {
+                  'buttons': message['buttons']
+              }
+          }
+      }
+    elif message['type'] == 'carousel':
+      carousel_hash = message['carousel_hash']
+      carousel_cards = message['carousel_cards']
+      payload = {
+          "messaging_product": "whatsapp",
+          "recipient_type": "individual",
+          "to": user_id,
+          "type": "template",
+          "template": {
+              "name":
+              carousel_hash,
+              "language": {
+                  "code": "fr"
+              },
+              "components": [{
+                  "type": "BODY"
+              }, {
+                  "type": "CAROUSEL",
+                  "cards": carousel_cards
+              }]
+          }
+      }
+    if payload:
+      try:
+        response = requests.post(
+            f'https://graph.facebook.com/v19.0/{phone_number_id}/messages',
+            json=payload,
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {WHATSAPP_TOKEN}'
+            })
+        if message['type'] == 'image':
+          try:
+            response = requests.head(message['value'])
+            imageSizeKB = int(response.headers['content-length']) / 1024
+            timeout = imageSizeKB * timeoutPerKB
+            time.sleep(timeout)
+          except Exception as e:
+            print('Failed to fetch image size:', e)
+            time.sleep(5)
+      except Exception as e:
+        print('Failed to send message:', e)
+
+
+def sendMessageSync(messages, phone_number_id, user_id):
+  timeoutPerKB = 10 / 1000  #10 milliseconds
+  for j, message in enumerate(messages):
+    payload = {}
+    if message['type'] == 'image':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'image',
+          'image': {
+              'link': message['value']
+          }
+      }
+    elif message['type'] == 'buttons':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'interactive',
+          'interactive': {
+              'type': 'button',
+              'body': {
+                  'text': messages[j - 1].get('value', 'Make your choice')
+              },  #previous message saved as "body" so no message sent twice
+              'action': {
+                  'buttons': message['buttons']
+              }
+          }
+      }
+    elif message['type'] == 'text':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'text',
+          'text': {
+              'preview_url': True,
+              'body': message['value']
+          }
+      }
+    elif message['type'] == 'card':
+      payload = {
+          'messaging_product': 'whatsapp',
+          'recipient_type': 'individual',
+          'to': user_id,
+          'type': 'interactive',
+          'interactive': {
+              'type': 'button',
+              'header': {
+                  'type': 'IMAGE',
+                  'image': {
+                      'link': message['header_image']
+                  }
+              },
+              'body': {
+                  'text': message['card_title']
+              },
+              'footer': {
+                  'text': message['card_description']
+              },
+              'action': {
+                  'buttons': message['buttons']
+              }
+          }
+      }
+    elif message['type'] == 'carousel':
+      carousel_hash = message['carousel_hash']
+      carousel_cards = message['carousel_cards']
+      payload = {
+          "messaging_product": "whatsapp",
+          "recipient_type": "individual",
+          "to": user_id,
+          "type": "template",
+          "template": {
+              "name":
+              carousel_hash,
+              "language": {
+                  "code": "fr"
+              },
+              "components": [{
+                  "type": "BODY"
+              }, {
+                  "type": "CAROUSEL",
+                  "cards": carousel_cards
+              }]
+          }
+      }
+    if payload:
+      try:
+        response = requests.post(
+            f'https://graph.facebook.com/v19.0/{phone_number_id}/messages',
+            json=payload,
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {WHATSAPP_TOKEN}'
+            })
+        if message['type'] == 'image':
+          try:
+            response = requests.head(message['value'])
+            imageSizeKB = int(response.headers['content-length']) / 1024
+            timeout = imageSizeKB * timeoutPerKB
+            time.sleep(timeout)
+          except Exception as e:
+            print('Failed to fetch image size:', e)
+            time.sleep(5)
+      except Exception as e:
+        print('Failed to send message:', e)
+
+
+def sendNoReplyDelayed(user_id, phone_number_id, user_name, timeout):
+  time.sleep(timeout)
+  global noreplyTimeoutActive
+  if noreplyTimeoutActive:
+    url = f'{VF_DM_URL}/state/user/{user_id}/interact'
+    headers = {'Authorization': VF_API_KEY, 'Content-Type': 'application/json'}
+    payload = {'action': {'type': 'no-reply'}}
+    api_response = requests.post(url, headers=headers, json=payload)
+    print(api_response.json())
+    responses = api_response.json()
+    sendMessageSync([{
+        'type': 'text',
+        'value': "doux jesus"
+    }], phone_number_id, user_id)
+
+
+async def sendNoReply(user_id, phone_number_id, user_name):
+  await interact(user_id, {'type': 'no-reply'}, phone_number_id, user_name)
+  
+
+
+##### Create a flask app and run it #####
+
+app = Flask(__name__)
+
+session = 0
+noreplyTimeoutActive = False
+user_id = None
+user_name = None
+
+DMconfig = {
+    "tts": False,
+    "stripSSML": True,
+}
+
+
+@app.route('/')
+def home():
+  return jsonify({
+      "success": True,
+      "info": "WhatsApp API v1.1.2 | V⦿iceflow | 2023",
+      "status": "healthy",
+      "error": None,
+  })
+
+
+### Define function to accepts POST requests at /webhook endpoint
+@app.route('/webhook', methods=['POST'])
+async def webhook():
+  # Parse the request body from the POST
+  body = request.json
+
+  # Check the Incoming webhook message
+  if body.get('object'):
+    # Check if the numer of messages is >0 (otherwise it means the trigger is a status update)
+    num_messages = len(
+        body.get('entry', [{}])[0].get('changes',
+                                       [{}])[0].get('value',
+                                                    {}).get('messages', []))
+
+    # If there is at least one message, process it, otherwise ignore the trigger (i.e. no action taken --> just return "ok")
+    if num_messages > 0:
+      global user_id, user_name
+      phone_number_id = body['entry'][0]['changes'][0]['value']['metadata'][
+          'phone_number_id']
+      user_id = body['entry'][0]['changes'][0]['value']['messages'][0]['from']
+      user_name = body['entry'][0]['changes'][0]['value']['contacts'][0][
+          'profile']['name']
+      message = body['entry'][0]['changes'][0]['value']['messages'][0]
+      print('\nWHATSAPP HOOK RECEIVED\n', message['type'])
+
+      if message['type'] == 'text':
+        # Less clear but more robust formulation : if 'text' in message
+        if message['text']['body'] == '/launch':
+          await interact(user_id, {
+              'type': 'launch',
+          }, phone_number_id, user_name)
+        else:
+          await interact(user_id, {
+              'type': 'text',
+              'payload': message['text']['body'],
+          }, phone_number_id, user_name)
+
+      elif message['type'] in ['audio', 'image', 'location', 'contacts']:
+        # Less clear but more robust formulation : if 'audio' in body['entry'][0]['changes'][0]['value']['messages'][0]  OR '' in ...
+        #fill later. For now we don't take it into account i.e. no action is taken.
+        print(
+            "Je ne prends pas encore en charge les messages multimédias. Pouvez-vous me répéter votre message par écrit ?"
+        )
+
+      elif message['type'] == 'interactive':  #it covers all the other cases
+        if 'path-' in message['interactive']['button_reply'][
+            'id']:  #indicates a button - with a path chosen by the user
+          await interact(
+              user_id, {
+                  'type': message['interactive']['button_reply']['id'],
+                  'payload': {
+                      'label': message['interactive']['button_reply']['title']
+                  }
+              }, phone_number_id, user_name)
+        else:
+          await interact(
+              user_id, {
+                  'type': message['interactive']['button_reply']['id'],
+                  'payload': {
+                      'label': message['interactive']['button_reply']['title']
+                  }
+              }, phone_number_id, user_name)
+
+      elif message['type'] == 'button':
+        message_request = json.loads(message['button']['payload'])
+        await interact(
+            user_id, {
+                'type': message_request['request_type'],
+                'payload': message_request['request_payload']
+            }, phone_number_id, user_name)
+
+    return jsonify({"message": "ok"}), 200
+
+  else:
+    # Return a '404 Not Found' if event is not from a WhatsApp API
+    return jsonify({"message": "error | unexpected body"}), 400
+
+
+### Setup webhook
+@app.route('/webhook', methods=['GET'])
+def verify_webhook():
+  # Check webhook for initialization
+  mode = request.args.get('hub.mode')
+  token = request.args.get('hub.verify_token')
+  challenge = request.args.get('hub.challenge')
+
+  if mode and token:
+    if mode == 'subscribe' and token == os.getenv("VERIFY_TOKEN", "voiceflow"):
+      print("WEBHOOK_VERIFIED")
+      return challenge, 200
+    else:
+      return "Forbidden", 403
+  else:
+    return "Bad Request", 400
+
+
+### Run the app
+
+if __name__ == '__main__':
+  # Run the app with Gunicorn
+  from gunicorn.app.base import BaseApplication
+
+  class FlaskApp(BaseApplication):
+
+    def __init__(self, app, options=None):
+      self.options = options or {}
+      self.application = app
+      super().__init__()
+
+    def load_config(self):
+      config = {
+          key: value
+          for key, value in self.options.items()
+          if key in self.cfg.settings and value is not None
+      }
+      for key, value in config.items():
+        self.cfg.set(key.lower(), value)
+
+    def load(self):
+      return self.application
+
+  options = {'bind': '0.0.0.0:' + str(os.getenv("PORT", 3000)), 'workers': 1}
+
+  FlaskApp(app, options).run()
